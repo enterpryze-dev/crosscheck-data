@@ -1,0 +1,137 @@
+name: kalshi prices
+on:
+  schedule:
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: kalshi
+  cancel-in-progress: false
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Fetch public Kalshi game prices
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, datetime, time
+          S = {"NBA":"KXNBAGAME","NFL":"KXNFLGAME","NHL":"KXNHLGAME","MLB":"KXMLBGAME","WNBA":"KXWNBAGAME","NCAAF":"KXNCAAFGAME","NCAAM":"KXNCAAMBGAME","EPL":"KXEPLGAME"}
+          out = {"pulled": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z", "markets": {}}
+          for lg, s in S.items():
+              time.sleep(0.4)
+              ms = None
+              for tr in range(4):
+                  try:
+                      r = urllib.request.urlopen(urllib.request.Request(f"https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker={s}&status=open&limit=400", headers={"User-Agent": "crosscheck/1.0"}), timeout=20)
+                      ms = json.load(r).get("markets", []); break
+                  except Exception as e:
+                      if "429" in str(e) and tr < 3: time.sleep(2 + 3 * tr); continue
+                      print(lg, "failed", e); break
+              if ms is None: continue
+              out["markets"][lg] = [[m["event_ticker"], m["ticker"], m.get("last_price_dollars"), m.get("yes_bid_dollars"), m.get("yes_ask_dollars")] for m in ms]
+              print(lg, len(ms))
+          # main spread and total per game: the rung priced closest to 50c that has a real bid
+          def page(series):
+              rows, cur = [], ""
+              for _ in range(8):
+                  time.sleep(0.4)
+                  u = f"https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker={series}&status=open&limit=1000" + (f"&cursor={cur}" if cur else "")
+                  j = None
+                  for tr in range(4):
+                      try:
+                          j = json.load(urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "crosscheck/1.0"}), timeout=20)); break
+                      except Exception as e:
+                          if "429" in str(e) and tr < 3: time.sleep(2 + 3 * tr); continue
+                          print(series, "failed", e); break
+                  if j is None: break
+                  rows += j.get("markets", []); cur = j.get("cursor") or ""
+                  if not cur: break
+              return rows
+          def main_rung(ms):
+              ev = {}
+              for m in ms:
+                  try: b = float(m.get("yes_bid_dollars") or 0); a = float(m.get("yes_ask_dollars") or 0)
+                  except Exception: continue
+                  if b <= 0 or a <= 0 or a - b > 0.08: continue
+                  d = abs((a + b) / 2 - 0.5); e = m["event_ticker"]
+                  if e not in ev or d < ev[e][0]: ev[e] = (d, [e, m["ticker"], m.get("floor_strike"), round(b, 2), round(a, 2)])
+              return [v[1] for v in ev.values()]
+          out["sp"], out["tot"] = {}, {}
+          for lg in ["NBA", "NFL", "NHL", "NCAAF", "WNBA"]:
+              out["sp"][lg] = main_rung(page(f"KX{lg}SPREAD")); out["tot"][lg] = main_rung(page(f"KX{lg}TOTAL"))
+              print(lg, "spread", len(out["sp"][lg]), "total", len(out["tot"][lg]))
+          json.dump(out, open("kalshi.json", "w"), separators=(",", ":"))
+          # player prop ladders (separate file so the board's 1-minute refresh stays small)
+          PS = {"NFL": {"KXNFLTD":"TD","KXNFLPASSYDS":"PASS YDS","KXNFLRSHYDS":"RUSH YDS","KXNFLRECYDS":"REC YDS","KXNFLREC":"REC","KXNFLRRYDS":"RUSH+REC","KXNFLPASSTDS":"PASS TD","KXNFLPASSCOMP":"CMP","KXNFLPASSATT":"ATT","KXNFLRSHATT":"CAR","KXNFLPASSINT":"INT"},
+                "NBA": {"KXNBAPTS":"PTS","KXNBAREB":"REB","KXNBAAST":"AST","KXNBA3PT":"3PM","KXNBAPRA":"PRA","KXNBAPR":"P+R","KXNBAPA":"P+A","KXNBARA":"R+A","KXNBASTL":"STL","KXNBABLK":"BLK"},
+                "NHL": {"KXNHLGOAL":"G","KXNHLANYGOAL":"G","KXNHLPTS":"PTS","KXNHLAST":"AST","KXNHLSAVES":"SV"},
+                "MLB": {"KXMLBHIT":"H","KXMLBTB":"TB","KXMLBHRR":"H+R+RBI","KXMLBKS":"K","KXMLBRBI":"RBI","KXMLBHR":"HR"}}
+          props = {"pulled": out["pulled"], "lg": {}}
+          for lg, ser in PS.items():
+              L = props["lg"].setdefault(lg, {})
+              for series, typ in ser.items():
+                  n = 0
+                  for m in page(series):
+                      try: b = float(m.get("yes_bid_dollars") or 0); a = float(m.get("yes_ask_dollars") or 0); k = float(m.get("floor_strike"))
+                      except Exception: continue
+                      if b <= 0 or a <= 0 or a - b > 0.10: continue
+                      t = m.get("title") or ""
+                      if ":" not in t: continue
+                      name = t.split(":")[0].strip()
+                      L.setdefault(m["event_ticker"], {}).setdefault(name, {}).setdefault(typ, []).append([k, round(b * 100), round(a * 100)]); n += 1
+                  print(lg, series, n)
+          json.dump(props, open("kalprops.json", "w"), separators=(",", ":"))
+          PY
+      - name: Merge the friends leaderboard
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, time
+          by = {}
+          def keep(x):
+              if not isinstance(x, dict) or not x.get("uid"): return
+              o = by.get(x["uid"])
+              if not o or (x.get("at") or 0) > (o.get("at") or 0): by[x["uid"]] = x
+          try:
+              j = json.load(urllib.request.urlopen("https://raw.githubusercontent.com/${{ github.repository }}/data/leaderboard.json?t=%d" % time.time(), timeout=20))
+              for x in j.get("rows", []): keep(x)
+          except Exception as e: print("no saved board yet", e)
+          try:
+              t = urllib.request.urlopen(urllib.request.Request("https://ntfy.sh/cc-lb-55815bd31373a4cad7b3/json?poll=1&since=12h", headers={"User-Agent": "crosscheck/1.0"}), timeout=20).read().decode()
+              for line in t.splitlines():
+                  try:
+                      m = json.loads(line)
+                      if m.get("event") == "message": keep(json.loads(m.get("message", "")))
+                  except Exception: pass
+          except Exception as e: print("ntfy read failed", e)
+          now = time.time() * 1000
+          rows = [x for x in by.values() if now - (x.get("at") or 0) < 60 * 864e5]
+          clean = []
+          for x in rows:
+              if x.get("remove"): clean.append({"uid": x["uid"], "remove": True, "at": x.get("at")}); continue
+              try: clean.append({"uid": str(x["uid"])[:24], "name": str(x.get("name", ""))[:24], "w": int(x.get("w", 0)), "l": int(x.get("l", 0)), "p": int(x.get("p", 0)), "units": float(x.get("units", 0)), "roi": float(x.get("roi", 0)), "clv": None if x.get("clv") is None else float(x["clv"]), "nclv": int(x.get("nclv", 0)), "at": int(x.get("at", 0))})
+              except Exception: pass
+          json.dump({"rows": clean, "merged": int(now)}, open("leaderboard.json", "w"), separators=(",", ":"))
+          print("leaderboard rows", len(clean))
+          PY
+      - name: Save to the data branch
+        run: |
+          git init -q pub && cd pub
+          git config user.name "kalshi-bot" && git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan data
+          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true)
+          git add -A && git commit -qm "kalshi prices $(date -u +%H:%M)"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
+      - name: Queue the next pull (GitHub's own 5-minute timer is unreliable)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          H=$(TZ=America/New_York date +%H)
+          if [ "$H" -ge 3 ] && [ "$H" -lt 9 ]; then sleep 1140; else sleep 240; fi
+          # only one chain at a time: skip if another run is already waiting or running
+          n=$(gh run list -w kalshi.yml -R "${{ github.repository }}" --limit 20 --json status,databaseId -q "[.[]|select(.databaseId!=${{ github.run_id }} and (.status==\"queued\" or .status==\"in_progress\" or .status==\"waiting\" or .status==\"pending\"))]|length")
+          if [ "${n:-0}" = "0" ]; then gh workflow run kalshi.yml --ref main -R "${{ github.repository }}"; else echo "another run is queued; not chaining"; fi
