@@ -1,3 +1,4 @@
 .wrangler/
 node_modules/
 deploy-log.txt
+deploy-pages-log.txt

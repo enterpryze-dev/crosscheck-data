@@ -51,14 +51,18 @@ function mainRung(ms) {
 }
 async function kal() {
   const out = { pulled: now(), markets: {}, sp: {}, tot: {}, live: true };
-  await Promise.all(Object.entries(KG).map(async ([lg, s]) => {
+  // one at a time with a short gap: Kalshi rate-limits bursts from shared cloud addresses
+  const gap = () => new Promise(z => setTimeout(z, 250));
+  for (const [lg, s] of Object.entries(KG)) {
     const j = await getJSON(KAPI + `series_ticker=${s}&limit=400`).catch(() => null);
     if (j) out.markets[lg] = (j.markets || []).map(m => [m.event_ticker, m.ticker, m.last_price_dollars, m.yes_bid_dollars, m.yes_ask_dollars]);
-  }));
-  await Promise.all(["NBA", "NFL", "NHL", "NCAAF", "WNBA"].map(async lg => {
-    const [s, t] = await Promise.all([kpage(`KX${lg}SPREAD`, 2), kpage(`KX${lg}TOTAL`, 2)]);
-    out.sp[lg] = mainRung(s); out.tot[lg] = mainRung(t);
-  }));
+    await gap();
+  }
+  for (const lg of ["NBA", "NFL", "NHL", "NCAAF", "WNBA"]) {
+    out.sp[lg] = mainRung(await kpage(`KX${lg}SPREAD`, 2)); await gap();
+    out.tot[lg] = mainRung(await kpage(`KX${lg}TOTAL`, 2)); await gap();
+  }
+  if (!Object.keys(out.markets).length) throw new Error("kalshi empty");
   return out;
 }
 async function kalp(lg) {
@@ -191,7 +195,9 @@ export default {
     const cache = caches.default;
     let res = await cache.match(key);
     if (!res) {
-      const body = kind === "kal" ? await kal() : kind === "kalp" ? await kalp(lg) : await props(lg);
+      let body;
+      try { body = kind === "kal" ? await kal() : kind === "kalp" ? await kalp(lg) : await props(lg); }
+      catch (e) { return new Response(JSON.stringify({ error: String(e && e.message || e) }), { status: 503, headers: { ...cors, "Content-Type": "application/json" } }); }
       res = new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${TTL[kind]}` } });
       ctx.waitUntil(cache.put(key, res.clone()));
     }
