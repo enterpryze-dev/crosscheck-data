@@ -14,6 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
       - name: Fetch public Kalshi game prices
         run: |
           python3 - <<'PY'
@@ -85,6 +88,9 @@ jobs:
                   print(lg, series, n)
           json.dump(props, open("kalprops.json", "w"), separators=(",", ":"))
           PY
+      - name: Fetch public Bovada player props
+        continue-on-error: true
+        run: python3 scripts/bovada.py bovprops.json
       - name: Merge the friends leaderboard
         continue-on-error: true
         run: |
@@ -122,7 +128,7 @@ jobs:
           git init -q pub && cd pub
           git config user.name "kalshi-bot" && git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan data
-          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true)
+          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true) && (mv ../bovprops.json . 2>/dev/null || true)
           git add -A && git commit -qm "kalshi prices $(date -u +%H:%M)"
           git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
       - name: Queue the next pull (GitHub's own 5-minute timer is unreliable)
