@@ -91,11 +91,60 @@ jobs:
       - name: Fetch public Bovada player props
         continue-on-error: true
         run: python3 scripts/bovada.py bovprops.json
-      - name: Merge the friends leaderboard
+      - name: Fetch public Pinnacle player props
+        continue-on-error: true
+        run: python3 scripts/pinnacle.py pinprops.json
+      - name: NFL touchdown-share model (rebuilt twice a day, carried over otherwise)
         continue-on-error: true
         run: |
           python3 - <<'PY'
-          import json, urllib.request, time
+          import json, time, urllib.request, datetime, subprocess
+          try:
+              j = json.load(urllib.request.urlopen("https://raw.githubusercontent.com/${{ github.repository }}/data/tdshare.json?t=%d" % time.time(), timeout=20))
+              age = time.time() - datetime.datetime.strptime(j["pulled"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).timestamp()
+          except Exception as e:
+              j, age = None, 1e9
+          if age < 12 * 3600:
+              json.dump(j, open("tdshare.json", "w"), separators=(",", ":")); print("kept tdshare, age h", round(age / 3600, 1))
+          else:
+              r = subprocess.run(["python3", "scripts/tdshare.py"])
+              if r.returncode and j: json.dump(j, open("tdshare.json", "w"), separators=(",", ":")); print("rebuild failed, kept old")
+          PY
+      - name: Merge the friends leaderboard (signed entries only)
+        continue-on-error: true
+        run: |
+          pip install -q cryptography >/dev/null 2>&1 || true
+          python3 - <<'PY'
+          # Entries are signed inside the password-locked app. This public file only holds the
+          # public half of the key, so nobody outside the app can post or overwrite rows.
+          import json, urllib.request, time, base64
+          from cryptography.hazmat.primitives import hashes, serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+          from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+          PUB = serialization.load_pem_public_key(b"""-----BEGIN PUBLIC KEY-----
+          MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEcTibna6lX0m1RcwsWhLoUBaUGz0q
+          lPCZl8NOxLqx3c6uqtn+udtCktXzBxOhB1wk6I24HeSOQDSx1LWScu1pKA==
+          -----END PUBLIC KEY-----""".replace(b"          ", b""))
+          now = time.time() * 1000
+          def verified(env):
+              try:
+                  d, s = env["d"], base64.b64decode(env["s"])
+                  if len(s) != 64: return None
+                  PUB.verify(encode_dss_signature(int.from_bytes(s[:32], "big"), int.from_bytes(s[32:], "big")), d.encode(), ec.ECDSA(hashes.SHA256()))
+                  x = json.loads(d)
+                  at = float(x.get("at") or 0)
+                  if not (now - 13 * 3600e3 < at < now + 10 * 60e3): return None  # no replays, no future stamps
+                  return x
+              except Exception:
+                  return None
+          def sane(x):
+              if x.get("remove"): return {"uid": str(x["uid"])[:24], "remove": True, "at": int(x.get("at", 0))}
+              w, l, p = int(x.get("w", 0)), int(x.get("l", 0)), int(x.get("p", 0))
+              u, roi = float(x.get("units", 0)), float(x.get("roi", 0))
+              if min(w, l, p) < 0 or w + l + p > 20000 or abs(u) > 100000 or abs(roi) > 100000: return None
+              clv = x.get("clv")
+              return {"uid": str(x["uid"])[:24], "name": str(x.get("name", ""))[:24], "w": w, "l": l, "p": p, "units": round(u, 2), "roi": round(roi, 1),
+                      "clv": None if clv is None else round(float(clv), 1), "nclv": int(x.get("nclv", 0)), "at": int(x.get("at", 0))}
           by = {}
           def keep(x):
               if not isinstance(x, dict) or not x.get("uid"): return
@@ -103,32 +152,32 @@ jobs:
               if not o or (x.get("at") or 0) > (o.get("at") or 0): by[x["uid"]] = x
           try:
               j = json.load(urllib.request.urlopen("https://raw.githubusercontent.com/${{ github.repository }}/data/leaderboard.json?t=%d" % time.time(), timeout=20))
-              for x in j.get("rows", []): keep(x)
+              if j.get("v") == 2:  # rows saved before signing was required are dropped once
+                  for x in j.get("rows", []): keep(x)
           except Exception as e: print("no saved board yet", e)
+          bad = 0
           try:
               t = urllib.request.urlopen(urllib.request.Request("https://ntfy.sh/cc-lb-55815bd31373a4cad7b3/json?poll=1&since=12h", headers={"User-Agent": "crosscheck/1.0"}), timeout=20).read().decode()
               for line in t.splitlines():
                   try:
                       m = json.loads(line)
-                      if m.get("event") == "message": keep(json.loads(m.get("message", "")))
-                  except Exception: pass
+                      if m.get("event") != "message": continue
+                      x = verified(json.loads(m.get("message", "")))
+                      x = x and sane(x)
+                      if x: keep(x)
+                      else: bad += 1
+                  except Exception: bad += 1
           except Exception as e: print("ntfy read failed", e)
-          now = time.time() * 1000
           rows = [x for x in by.values() if now - (x.get("at") or 0) < 60 * 864e5]
-          clean = []
-          for x in rows:
-              if x.get("remove"): clean.append({"uid": x["uid"], "remove": True, "at": x.get("at")}); continue
-              try: clean.append({"uid": str(x["uid"])[:24], "name": str(x.get("name", ""))[:24], "w": int(x.get("w", 0)), "l": int(x.get("l", 0)), "p": int(x.get("p", 0)), "units": float(x.get("units", 0)), "roi": float(x.get("roi", 0)), "clv": None if x.get("clv") is None else float(x["clv"]), "nclv": int(x.get("nclv", 0)), "at": int(x.get("at", 0))})
-              except Exception: pass
-          json.dump({"rows": clean, "merged": int(now)}, open("leaderboard.json", "w"), separators=(",", ":"))
-          print("leaderboard rows", len(clean))
+          json.dump({"v": 2, "rows": rows, "merged": int(now)}, open("leaderboard.json", "w"), separators=(",", ":"))
+          print("leaderboard rows", len(rows), "rejected", bad)
           PY
       - name: Save to the data branch
         run: |
           git init -q pub && cd pub
           git config user.name "kalshi-bot" && git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan data
-          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true) && (mv ../bovprops.json . 2>/dev/null || true)
+          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true) && (mv ../bovprops.json . 2>/dev/null || true) && (mv ../pinprops.json . 2>/dev/null || true) && (mv ../tdshare.json . 2>/dev/null || true)
           git add -A && git commit -qm "kalshi prices $(date -u +%H:%M)"
           git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
       - name: Queue the next pull (GitHub's own 5-minute timer is unreliable)
