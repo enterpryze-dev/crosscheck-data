@@ -110,6 +110,12 @@ jobs:
               r = subprocess.run(["python3", "scripts/tdshare.py"])
               if r.returncode and j: json.dump(j, open("tdshare.json", "w"), separators=(",", ":")); print("rebuild failed, kept old")
           PY
+      - name: Player matchups from ESPN game logs (rebuilt daily and after 2 PM ET, carried over otherwise)
+        continue-on-error: true
+        timeout-minutes: 11
+        run: |
+          curl -sf "https://raw.githubusercontent.com/${{ github.repository }}/data/matchups.json?t=$(date +%s)" -o prev_matchups.json || rm -f prev_matchups.json
+          python3 scripts/matchups.py matchups.json prev_matchups.json || { [ -s prev_matchups.json ] && cp prev_matchups.json matchups.json; echo "build failed, kept old"; }
       - name: Merge the friends leaderboard (signed entries only)
         continue-on-error: true
         run: |
@@ -177,7 +183,7 @@ jobs:
           git init -q pub && cd pub
           git config user.name "kalshi-bot" && git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q --orphan data
-          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true) && (mv ../bovprops.json . 2>/dev/null || true) && (mv ../pinprops.json . 2>/dev/null || true) && (mv ../tdshare.json . 2>/dev/null || true)
+          mv ../kalshi.json . && (mv ../leaderboard.json . 2>/dev/null || true) && (mv ../kalprops.json . 2>/dev/null || true) && (mv ../bovprops.json . 2>/dev/null || true) && (mv ../pinprops.json . 2>/dev/null || true) && (mv ../tdshare.json . 2>/dev/null || true) && (mv ../matchups.json . 2>/dev/null || true)
           git add -A && git commit -qm "kalshi prices $(date -u +%H:%M)"
           git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
       - name: Queue the next pull (GitHub's own 5-minute timer is unreliable)
