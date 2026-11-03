@@ -5,7 +5,7 @@
 // no accounts, no keys of anyone's, nothing personal.
 
 const TTL = { kal: 30, kalp: 30, props: 20 };
-const ALLOW = /^https:\/\/[a-z0-9-]+\.github\.io$|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
+const ALLOW = /^https:\/\/enterpryze-dev\.github\.io$|^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
 const UA = "Mozilla/5.0 crosscheck/1.0";
 const now = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
 

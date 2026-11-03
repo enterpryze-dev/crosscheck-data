@@ -161,7 +161,9 @@ def pick(lg, stats, hurt, prob):
         if qb: out.append(ath(qb, "QB", "QB"))
         rb = next((a for a in by.get("rushing") or [] if not qb or a["athlete"]["id"] != qb["athlete"]["id"]), None)
         if rb: out.append(ath(rb, "RB", "RB"))
-        for i, a in enumerate((by.get("receiving") or [])[:3]): out.append(ath(a, f"WR{i + 1}", "REC"))
+        used = {p["id"] for p in out}           # a RB/QB who also leads in catches is listed once, by his first role
+        recv = [a for a in by.get("receiving") or [] if str((a.get("athlete") or {}).get("id")) not in used]
+        for i, a in enumerate(recv[:3]): out.append(ath(a, f"WR{i + 1}", "REC"))
         return out
     if lg == "NHL":
         out = []
